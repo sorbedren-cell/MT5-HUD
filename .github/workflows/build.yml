@@ -1,26 +1,436 @@
 name: Build MT5 HUD APK
-
 on: [push, workflow_dispatch]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 سحب الأكواد البرمجية
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: ☕ تجهيز بيئة جافا JDK 17
-        uses: actions/setup-java@v5
+      - name: Generate project files
+        run: |
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "MT5SmartHUD"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+          mkdir -p app
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.smart.mt5hud'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.smart.mt5hud"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName "2.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.Light">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MT5AutoService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewTextChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="200"
+              android:packageNames="net.metaquotes.metatrader5"
+              android:description="@string/service_desc"
+              android:settingsActivity="com.smart.mt5hud.MainActivity" />
+          EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">MT5 Smart HUD</string>
+              <string name="service_desc">يحمي حسابك بتحديد أقصى حجم عقد في تطبيق MetaTrader 5</string>
+              <string name="max_lot_label">أقصى حجم عقد (Lot)</string>
+              <string name="enable_lock">تفعيل قفل الحجم</string>
+              <string name="save">حفظ</string>
+              <string name="open_access">تفعيل الخدمة من إعدادات إمكانية الوصول</string>
+              <string name="saved">تم الحفظ</string>
+              <string name="invalid">أدخل رقماً صحيحاً أكبر من صفر</string>
+              <string name="require_sl">تنبيه عند غياب وقف الخسارة (SL)</string>
+              <string name="require_tp">تنبيه عند غياب جني الأرباح (TP)</string>
+          </resources>
+          EOF
+          mkdir -p app/src/main/java/com/smart/mt5hud
+          cat > app/src/main/java/com/smart/mt5hud/Prefs.kt <<'EOF'
+          package com.smart.mt5hud
+
+          import android.content.Context
+
+          class Prefs(ctx: Context) {
+              private val sp = ctx.applicationContext.getSharedPreferences("hud", Context.MODE_PRIVATE)
+
+              var enabled: Boolean
+                  get() = sp.getBoolean("enabled", true)
+                  set(v) { sp.edit().putBoolean("enabled", v).apply() }
+
+              var maxLot: Double
+                  get() = sp.getString("maxLot", "0.01")?.toDoubleOrNull() ?: 0.01
+                  set(v) { sp.edit().putString("maxLot", v.toString()).apply() }
+
+              var requireSl: Boolean
+                  get() = sp.getBoolean("requireSl", true)
+                  set(v) { sp.edit().putBoolean("requireSl", v).apply() }
+
+              var requireTp: Boolean
+                  get() = sp.getBoolean("requireTp", false)
+                  set(v) { sp.edit().putBoolean("requireTp", v).apply() }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/smart/mt5hud
+          cat > app/src/main/java/com/smart/mt5hud/MainActivity.kt <<'EOF'
+          package com.smart.mt5hud
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = Prefs(this)
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad, pad, pad)
+                  }
+                  val title = TextView(this).apply {
+                      text = getString(R.string.app_name); textSize = 22f
+                  }
+                  val label = TextView(this).apply { text = getString(R.string.max_lot_label) }
+                  val input = EditText(this).apply {
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      setText(prefs.maxLot.toString())
+                  }
+                  val toggle = Switch(this).apply {
+                      text = getString(R.string.enable_lock); isChecked = prefs.enabled
+                  }
+                  val slSwitch = Switch(this).apply {
+                      text = getString(R.string.require_sl); isChecked = prefs.requireSl
+                  }
+                  val tpSwitch = Switch(this).apply {
+                      text = getString(R.string.require_tp); isChecked = prefs.requireTp
+                  }
+                  val save = Button(this).apply {
+                      text = getString(R.string.save)
+                      setOnClickListener {
+                          val v = input.text.toString().replace(',', '.').toDoubleOrNull()
+                          if (v == null || v <= 0.0) {
+                              Toast.makeText(context, R.string.invalid, Toast.LENGTH_SHORT).show()
+                          } else {
+                              prefs.maxLot = v
+                              prefs.enabled = toggle.isChecked
+                              prefs.requireSl = slSwitch.isChecked
+                              prefs.requireTp = tpSwitch.isChecked
+                              Toast.makeText(context, R.string.saved, Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                  }
+                  val open = Button(this).apply {
+                      text = getString(R.string.open_access)
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  }
+                  listOf(title, label, input, toggle, slSwitch, tpSwitch, save, open).forEach { root.addView(it) }
+                  setContentView(root)
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/smart/mt5hud
+          cat > app/src/main/java/com/smart/mt5hud/MT5AutoService.kt <<'EOF'
+          package com.smart.mt5hud
+
+          import android.accessibilityservice.AccessibilityService
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.TextView
+          import java.util.Locale
+
+          class MT5AutoService : AccessibilityService() {
+
+              private enum class Field { VOLUME, SL, TP }
+
+              private val mt5Package = "net.metaquotes.metatrader5"
+              private val labels = mapOf(
+                  Field.VOLUME to listOf("volume", "الحجم", "lots"),
+                  Field.SL to listOf("stop loss", "stop-loss", "وقف الخسارة", "وقف خسارة"),
+                  Field.TP to listOf("take profit", "take-profit", "جني الأرباح", "جني الربح", "هدف الربح")
+              )
+
+              private var hud: TextView? = null
+              private var lastRun = 0L
+              private var lastAdjust: String? = null
+              private var lastAdjustAt = 0L
+              private var warningShown = false
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  showHud()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event?.packageName?.toString() != mt5Package) return
+                  val now = System.currentTimeMillis()
+                  if (now - lastRun < 300) return
+                  lastRun = now
+
+                  val prefs = Prefs(this)
+                  val root = rootInActiveWindow ?: return
+                  val edits = mutableListOf<AccessibilityNodeInfo>()
+                  collectEdits(root, edits)
+
+                  var hasVolume = false
+                  var slMissing = false
+                  var tpMissing = false
+
+                  for (node in edits) {
+                      when (fieldOf(node)) {
+                          Field.VOLUME -> {
+                              hasVolume = true
+                              if (prefs.enabled) capVolume(node, prefs.maxLot)
+                          }
+                          Field.SL -> if (isBlankValue(node)) slMissing = true
+                          Field.TP -> if (isBlankValue(node)) tpMissing = true
+                          null -> {}
+                      }
+                  }
+
+                  val warnings = mutableListOf<String>()
+                  if (hasVolume && prefs.requireSl && slMissing) warnings += "⚠️ لا يوجد وقف خسارة (SL)"
+                  if (hasVolume && prefs.requireTp && tpMissing) warnings += "⚠️ لا يوجد جني أرباح (TP)"
+                  render(prefs, warnings)
+              }
+
+              private fun capVolume(node: AccessibilityNodeInfo, maxLot: Double) {
+                  val value = node.text?.toString()?.replace(',', '.')?.toDoubleOrNull() ?: return
+                  if (value <= maxLot) return
+                  val newText = String.format(Locale.US, "%.2f", maxLot)
+                  val args = Bundle().apply {
+                      putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+                  }
+                  if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                      lastAdjust = "🔒 تم خفض الحجم من $value إلى $newText"
+                      lastAdjustAt = System.currentTimeMillis()
+                  }
+              }
+
+              // الحقل فارغ، أو صفر، أو يعرض نص الإرشاد (Stop Loss / Take Profit) بدل قيمة
+              private fun isBlankValue(node: AccessibilityNodeInfo): Boolean {
+                  val t = node.text?.toString()?.trim().orEmpty()
+                  if (t.isEmpty()) return true
+                  val d = t.replace(',', '.').toDoubleOrNull()
+                  if (d != null) return d == 0.0
+                  return labelOfString(t) != null
+              }
+
+              // نحدد نوع الحقل فقط إذا ارتبط بوضوح بتسميته، ولا نخمّن عند وجود عدة حقول معاً
+              private fun fieldOf(node: AccessibilityNodeInfo): Field? {
+                  labelOf(node)?.let { return it }
+                  var p = node.parent
+                  var depth = 0
+                  while (p != null && depth < 3) {
+                      if (countEdits(p) != 1) return null
+                      subtreeField(p)?.let { return it }
+                      p = p.parent
+                      depth++
+                  }
+                  return null
+              }
+
+              private fun labelOf(n: AccessibilityNodeInfo): Field? {
+                  val s = listOfNotNull(
+                      n.text, n.contentDescription,
+                      if (Build.VERSION.SDK_INT >= 26) n.hintText else null
+                  ).joinToString(" ")
+                  return labelOfString(s)
+              }
+
+              private fun labelOfString(s: String): Field? {
+                  val l = s.lowercase()
+                  for ((field, words) in labels) if (words.any { l.contains(it) }) return field
+                  return null
+              }
+
+              private fun subtreeField(n: AccessibilityNodeInfo): Field? {
+                  labelOf(n)?.let { return it }
+                  for (i in 0 until n.childCount) {
+                      val c = n.getChild(i) ?: continue
+                      subtreeField(c)?.let { return it }
+                  }
+                  return null
+              }
+
+              private fun countEdits(n: AccessibilityNodeInfo): Int {
+                  var c = if (n.className == "android.widget.EditText") 1 else 0
+                  for (i in 0 until n.childCount) {
+                      val ch = n.getChild(i) ?: continue
+                      c += countEdits(ch)
+                  }
+                  return c
+              }
+
+              private fun collectEdits(n: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
+                  if (n.className == "android.widget.EditText") out.add(n)
+                  for (i in 0 until n.childCount) {
+                      val ch = n.getChild(i) ?: continue
+                      collectEdits(ch, out)
+                  }
+              }
+
+              private fun render(prefs: Prefs, warnings: List<String>) {
+                  val tv = hud ?: return
+                  if (warnings.isNotEmpty()) {
+                      tv.setBackgroundColor(Color.parseColor("#CCB71C1C"))
+                      tv.text = warnings.joinToString("\n")
+                      if (!warningShown) { vibrate(); warningShown = true }
+                      return
+                  }
+                  warningShown = false
+                  tv.setBackgroundColor(Color.parseColor("#CC0B3D2E"))
+                  val adj = lastAdjust
+                  tv.text = when {
+                      adj != null && System.currentTimeMillis() - lastAdjustAt < 5000 -> adj
+                      prefs.enabled -> "🔒 الحد الأقصى ${prefs.maxLot}"
+                      else -> "🔓 القفل متوقف"
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun vibrate() {
+                  val v = getSystemService(VIBRATOR_SERVICE) as? Vibrator ?: return
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      v.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
+                  } else {
+                      v.vibrate(300)
+                  }
+              }
+
+              private fun showHud() {
+                  val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val tv = TextView(this).apply {
+                      setTextColor(Color.parseColor("#FFD700"))
+                      setBackgroundColor(Color.parseColor("#CC0B3D2E"))
+                      setPadding(24, 12, 24, 12)
+                      textSize = 12f
+                  }
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.END; y = 120 }
+                  wm.addView(tv, lp)
+                  hud = tv
+                  render(Prefs(this), emptyList())
+              }
+
+              override fun onDestroy() {
+                  hud?.let { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it) }
+                  hud = null
+                  super.onDestroy()
+              }
+
+              override fun onInterrupt() {}
+          }
+          EOF
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: ⚙️ إنشاء مسار APK المخرجات
-        run: |
-          mkdir -p app/build/outputs/apk/debug/
-          printf "PK\x03\x04" > app/build/outputs/apk/debug/app-debug.apk
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
-      - name: 📦 رفع ملف APK الناتج
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MT5-Smart-HUD-APK
