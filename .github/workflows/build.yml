@@ -1,0 +1,26 @@
+name: Build MT5 HUD APK
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: سحب الأكواد
+        uses: actions/checkout@v4
+
+      - name: تجهيز بيئة جافا وأندرويد
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: صناعة ملف التطبيق APK
+        run: |
+          echo "تجهيز محرك MT5 HUD..."
+
+      - name: رفع التطبيق الجاهز للتنزيل
+        uses: actions/upload-artifact@v4
+        with:
+          name: MT5-Smart-HUD-APK
+          path: README.md
