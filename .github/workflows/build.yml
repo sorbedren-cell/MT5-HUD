@@ -47,8 +47,8 @@ jobs:
                   applicationId "com.smart.mt5hud"
                   minSdk 24
                   targetSdk 34
-                  versionCode 4
-                  versionName "3.0-Pro"
+                  versionCode 5
+                  versionName "4.0-AI-Bot"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -63,6 +63,7 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.INTERNET" />
 
               <queries>
                   <package android:name="net.metaquotes.metatrader5" />
@@ -105,17 +106,19 @@ jobs:
               android:accessibilityFeedbackType="feedbackGeneric"
               android:accessibilityFlags="flagReportViewIds"
               android:canRetrieveWindowContent="true"
-              android:notificationTimeout="150"
+              android:notificationTimeout="120"
               android:description="@string/service_desc"
               android:settingsActivity="com.smart.mt5hud.MainActivity" />
           EOF
           mkdir -p app/src/main/res/values
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <resources>
-              <string name="app_name">MT5 Smart HUD Pro</string>
-              <string name="service_desc">حماية ذكية وتلقائية لحسابك فوق تطبيق MetaTrader 5</string>
+              <string name="app_name">MT5 AI Bot &amp; HUD</string>
+              <string name="service_desc">روبوت ذكي لتحليل السيولة والتداول الآلي وحماية الحساب فوق MT5</string>
               <string name="max_lot_label">أقصى حجم عقد مسموح (Lot)</string>
               <string name="enable_lock">تفعيل قفل الحجم التلقائي</string>
+              <string name="enable_bot">🤖 تفعيل الروبوت الآلي (بيع وشراء تلقائي عند السيولة)</string>
+              <string name="enable_draw">🎨 رسم مناطق السيولة (BSL / SSL) فوق الشارت</string>
               <string name="save">حفظ الإعدادات</string>
               <string name="open_access">1. تفعيل الخدمة من إمكانية الوصول</string>
               <string name="saved">تم حفظ الإعدادات بنجاح</string>
@@ -133,7 +136,7 @@ jobs:
               <string name="approve">اعتماد نسخة MT5 الحالية</string>
               <string name="approved_done">تم اعتماد النسخة</string>
               <string name="refresh_diag">تحديث التشخيص</string>
-              <string name="diag_title">تقرير الفحص الذكي:</string>
+              <string name="diag_title">تقرير الفحص الذكي والسيولة:</string>
               <string name="diag_empty">لا يوجد تقرير بعد. افتح MT5 ثم ارجع هنا.</string>
           </resources>
           EOF
@@ -149,6 +152,14 @@ jobs:
               var enabled: Boolean
                   get() = sp.getBoolean("enabled", true)
                   set(v) { sp.edit().putBoolean("enabled", v).apply() }
+
+              var botEnabled: Boolean
+                  get() = sp.getBoolean("botEnabled", false)
+                  set(v) { sp.edit().putBoolean("botEnabled", v).apply() }
+
+              var drawLiquidity: Boolean
+                  get() = sp.getBoolean("drawLiq", true)
+                  set(v) { sp.edit().putBoolean("drawLiq", v).apply() }
 
               var maxLot: Double
                   get() = sp.getString("maxLot", "0.01")?.toDoubleOrNull() ?: 0.01
@@ -212,6 +223,88 @@ jobs:
               null
           }
           EOF
+          cat > app/src/main/java/com/smart/mt5hud/LiquidityOverlayView.kt <<'EOF'
+          package com.smart.mt5hud
+
+          import android.content.Context
+          import android.graphics.*
+          import android.view.View
+          import java.util.Locale
+
+          class LiquidityOverlayView(ctx: Context) : View(ctx) {
+              var bslPrice: Double = 0.0
+              var sslPrice: Double = 0.0
+              var currentPrice: Double = 0.0
+              var signalText: String = "🌐 جاري مسح السيولة..."
+              var showZones: Boolean = true
+
+              private val bslPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#CCFF5252")
+                  strokeWidth = 4f
+                  style = Paint.Style.STROKE
+                  pathEffect = DashPathEffect(floatArrayOf(20f, 12f), 0f)
+              }
+              private val bslBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#28FF5252")
+                  style = Paint.Style.FILL
+              }
+              private val sslPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#CC00E5FF")
+                  strokeWidth = 4f
+                  style = Paint.Style.STROKE
+                  pathEffect = DashPathEffect(floatArrayOf(20f, 12f), 0f)
+              }
+              private val sslBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#2800E5FF")
+                  style = Paint.Style.FILL
+              }
+              private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.WHITE
+                  textSize = 26f
+                  typeface = Typeface.DEFAULT_BOLD
+                  setShadowLayer(4f, 0f, 0f, Color.BLACK)
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  super.onDraw(canvas)
+                  if (!showZones || bslPrice <= 0.0 || sslPrice <= 0.0) return
+
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+
+                  // تحديد منطقة الرسم فوق الشارت (في منتصف الشاشة بعيداً عن الأزرار العلوية والسفلية)
+                  val topY = h * 0.26f
+                  val botY = h * 0.68f
+                  val chartRight = w * 0.82f
+
+                  // رسم منطقة سيولة القمة (BSL - منطقة بيع محتملة)
+                  canvas.drawRect(40f, topY - 28f, chartRight, topY + 10f, bslBoxPaint)
+                  canvas.drawLine(40f, topY, chartRight, topY, bslPaint)
+                  textPaint.color = Color.parseColor("#FF8A80")
+                  canvas.drawText(
+                      String.format(Locale.US, "🔻 سيولة القمة (BSL): %.2f", bslPrice),
+                      50f, topY - 10f, textPaint
+                  )
+
+                  // رسم منطقة سيولة القاع (SSL - منطقة شراء محتملة)
+                  canvas.drawRect(40f, botY - 10f, chartRight, botY + 28f, sslBoxPaint)
+                  canvas.drawLine(40f, botY, chartRight, botY, sslPaint)
+                  textPaint.color = Color.parseColor("#84FFFF")
+                  canvas.drawText(
+                      String.format(Locale.US, "🔺 سيولة القاع (SSL): %.2f", sslPrice),
+                      50f, botY + 34f, textPaint
+                  )
+
+                  // رسم مؤشر موقع السعر الحالي بين القمة والقاع
+                  if (currentPrice > 0.0 && bslPrice > sslPrice) {
+                      val ratio = ((bslPrice - currentPrice) / (bslPrice - sslPrice)).toFloat().coerceIn(0f, 1f)
+                      val curY = topY + ratio * (botY - topY)
+                      textPaint.color = Color.parseColor("#FFD700")
+                      canvas.drawText("◀ $signalText", 50f, curY, textPaint)
+                  }
+              }
+          }
+          EOF
           cat > app/src/main/java/com/smart/mt5hud/MainActivity.kt <<'EOF'
           package com.smart.mt5hud
 
@@ -253,6 +346,12 @@ jobs:
                   val toggle = Switch(this).apply {
                       text = getString(R.string.enable_lock); isChecked = prefs.enabled
                   }
+                  val botSwitch = Switch(this).apply {
+                      text = getString(R.string.enable_bot); isChecked = prefs.botEnabled
+                  }
+                  val drawSwitch = Switch(this).apply {
+                      text = getString(R.string.enable_draw); isChecked = prefs.drawLiquidity
+                  }
                   val slSwitch = Switch(this).apply {
                       text = getString(R.string.require_sl); isChecked = prefs.requireSl
                   }
@@ -280,6 +379,8 @@ jobs:
                           } else {
                               prefs.maxLot = v
                               prefs.enabled = toggle.isChecked
+                              prefs.botEnabled = botSwitch.isChecked
+                              prefs.drawLiquidity = drawSwitch.isChecked
                               prefs.requireSl = slSwitch.isChecked
                               prefs.requireTp = tpSwitch.isChecked
                               prefs.dailyLimitPct = d
@@ -315,9 +416,9 @@ jobs:
                       setOnClickListener { refresh() }
                   }
                   listOf(
-                      title, status, open, label, input, toggle, slSwitch, tpSwitch,
-                      dailyLabel, dailyInput, dailySwitch, blockSwitch, save, reset, approve,
-                      diagTitle, diagView, refreshBtn
+                      title, status, open, label, input, toggle, botSwitch, drawSwitch,
+                      slSwitch, tpSwitch, dailyLabel, dailyInput, dailySwitch, blockSwitch,
+                      save, reset, approve, diagTitle, diagView, refreshBtn
                   ).forEach { root.addView(it) }
                   setContentView(ScrollView(this).apply { addView(root) })
               }
@@ -347,6 +448,8 @@ jobs:
           import android.graphics.PixelFormat
           import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.os.VibrationEffect
           import android.os.Vibrator
           import android.view.Gravity
@@ -355,10 +458,16 @@ jobs:
           import android.view.WindowManager
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.LinearLayout
           import android.widget.TextView
+          import org.json.JSONArray
+          import java.net.HttpURLConnection
+          import java.net.URL
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
+          import kotlin.concurrent.thread
+          import kotlin.math.abs
 
           class MT5AutoService : AccessibilityService() {
 
@@ -374,43 +483,184 @@ jobs:
               private val balanceWords = listOf("balance", "الرصيد")
               private val equityWords = listOf("equity", "الأسهم", "حقوق الملكية")
               private val numRe = Regex("^[-+]?[0-9][0-9 .,\u00A0\u202F]*\$")
+              private val priceExtractRe = Regex("([0-9]{3,5}\\.[0-9]{2})")
 
-              private var hud: TextView? = null
-              private var hudParams: WindowManager.LayoutParams? = null
+              private var hudContainer: LinearLayout? = null
+              private var hudText: TextView? = null
+              private var botToggleBtn: TextView? = null
+              private var overlayView: LiquidityOverlayView? = null
+
               private var lastRun = 0L
               private var lastDiagAt = 0L
               private var lastAdjust: String? = null
               private var lastAdjustAt = 0L
               private var lastWarnKey = ""
               private var lastBlockAt = 0L
+              private var lastTradeAt = 0L
+              private var lastNetFetch = 0L
+
+              // متغيرات رادار السيولة والروبوت
+              private val priceMemory = mutableListOf<Double>()
+              private var netBsl = 0.0
+              private var netSsl = 0.0
+              private var aiSignal = "⏳ جاري تحليل السيولة..."
+              private val mainHandler = Handler(Looper.getMainLooper())
 
               override fun onServiceConnected() {
                   super.onServiceConnected()
-                  showHud()
+                  showOverlays()
+                  startInternetRadar()
+              }
+
+              // جلب بيانات السيولة الحية للذهب عبر الإنترنت كل 12 ثانية
+              private fun startInternetRadar() {
+                  thread(start = true) {
+                      while (true) {
+                          try {
+                              val now = System.currentTimeMillis()
+                              if (now - lastNetFetch > 12000) {
+                                  lastNetFetch = now
+                                  val url = URL("https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&limit=24")
+                                  val conn = url.openConnection() as HttpURLConnection
+                                  conn.connectTimeout = 5000
+                                  conn.readTimeout = 5000
+                                  if (conn.responseCode == 200) {
+                                      val body = conn.inputStream.bufferedReader().readText()
+                                      val arr = JSONArray(body)
+                                      var maxH = 0.0
+                                      var minL = Double.MAX_VALUE
+                                      for (i in 0 until arr.length()) {
+                                          val k = arr.getJSONArray(i)
+                                          val h = k.getString(2).toDoubleOrNull() ?: continue
+                                          val l = k.getString(3).toDoubleOrNull() ?: continue
+                                          if (h > maxH) maxH = h
+                                          if (l < minL) minL = l
+                                      }
+                                      if (maxH > 0.0 && minL < Double.MAX_VALUE) {
+                                          netBsl = maxH
+                                          netSsl = minL
+                                      }
+                                  }
+                              }
+                          } catch (_: Exception) {}
+                          Thread.sleep(5000)
+                      }
+                  }
               }
 
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
                   val pkg = event?.packageName?.toString() ?: return
 
-                  // إخفاء الشاشة العائمة تلقائياً عند الخروج من MT5 وإظهارها عند الدخول
                   if (pkg != MT5_PACKAGE) {
                       if (pkg != packageName && !pkg.contains("inputmethod") && !pkg.contains("keyboard")) {
-                          hud?.visibility = View.GONE
+                          hudContainer?.visibility = View.GONE
+                          overlayView?.visibility = View.GONE
                       }
                       return
                   }
-                  hud?.visibility = View.VISIBLE
+                  val prefs = Prefs(this)
+                  hudContainer?.visibility = View.VISIBLE
+                  overlayView?.visibility = if (prefs.drawLiquidity) View.VISIBLE else View.GONE
 
                   val now = System.currentTimeMillis()
-                  if (now - lastRun < 250) return
+                  if (now - lastRun < 220) return
                   lastRun = now
 
-                  val prefs = Prefs(this)
                   val root = rootInActiveWindow ?: return
                   val edits = mutableListOf<AccessibilityNodeInfo>()
                   val texts = mutableListOf<String>()
                   val descs = mutableListOf<String>()
-                  collect(root, edits, texts, descs)
+                  var buyBtnNode: AccessibilityNodeInfo? = null
+                  var sellBtnNode: AccessibilityNodeInfo? = null
+                  var screenBuyPrice: Double? = null
+                  var screenSellPrice: Double? = null
+
+                  collectAll(root, edits, texts, descs) { node, combinedText ->
+                      val low = combinedText.lowercase()
+                      if (low.contains("buy") || low.contains("شراء")) {
+                          if (node.isClickable) buyBtnNode = node
+                          else if (node.parent?.isClickable == true) buyBtnNode = node.parent
+                          priceExtractRe.find(combinedText)?.groupValues?.get(1)?.toDoubleOrNull()?.let {
+                              screenBuyPrice = it
+                          }
+                      }
+                      if (low.contains("sell") || low.contains("بيع")) {
+                          if (node.isClickable) sellBtnNode = node
+                          else if (node.parent?.isClickable == true) sellBtnNode = node.parent
+                          priceExtractRe.find(combinedText)?.groupValues?.get(1)?.toDoubleOrNull()?.let {
+                              screenSellPrice = it
+                          }
+                      }
+                  }
+
+                  // استخراج السعر الحي من الشاشة وتحديث رادار السيولة
+                  val livePrice = screenBuyPrice ?: screenSellPrice ?: extractChartPrice(texts)
+                  if (livePrice != null && livePrice > 100.0) {
+                      priceMemory.add(livePrice)
+                      if (priceMemory.size > 120) priceMemory.removeAt(0)
+                  }
+
+                  val localHigh = priceMemory.maxOrNull() ?: 0.0
+                  val localLow = priceMemory.minOrNull() ?: 0.0
+
+                  // إذا كان سعر الشاشة قريباً من سعر الإنترنت ندمجهما، وإلا نعتمد سيولة الشاشة المباشرة
+                  val activeBsl = if (livePrice != null && netBsl > 0 && abs(livePrice - netBsl) < 60) {
+                      maxOf(netBsl, localHigh)
+                  } else if (localHigh > 0) {
+                      if (localHigh - localLow < 2.0) localHigh + 3.5 else localHigh
+                  } else netBsl
+
+                  val activeSsl = if (livePrice != null && netSsl > 0 && abs(livePrice - netSsl) < 60) {
+                      minOf(netSsl, if (localLow > 0) localLow else netSsl)
+                  } else if (localLow > 0) {
+                      if (localHigh - localLow < 2.0) localLow - 3.5 else localLow
+                  } else netSsl
+
+                  // تحليل الذكاء الاصطناعي واتخاذ قرار البيع أو الشراء
+                  if (livePrice != null && activeBsl > activeSsl && activeSsl > 0) {
+                      val range = (activeBsl - activeSsl).coerceAtLeast(1.0)
+                      val distToTop = activeBsl - livePrice
+                      val distToBot = livePrice - activeSsl
+
+                      when {
+                          distToTop <= range * 0.15 -> {
+                              aiSignal = "🔴 سحب سيولة قمة (إشارة بيع SELL)"
+                              if (prefs.botEnabled && !prefs.limitHit && now - lastTradeAt > 30000) {
+                                  sellBtnNode?.let {
+                                      lastTradeAt = now
+                                      vibrate()
+                                      it.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                      lastAdjust = "🤖 الروبوت نفذ صفقة بيع (SELL) عند $livePrice"
+                                      lastAdjustAt = now
+                                  }
+                              }
+                          }
+                          distToBot <= range * 0.15 -> {
+                              aiSignal = "🟢 سحب سيولة قاع (إشارة شراء BUY)"
+                              if (prefs.botEnabled && !prefs.limitHit && now - lastTradeAt > 30000) {
+                                  buyBtnNode?.let {
+                                      lastTradeAt = now
+                                      vibrate()
+                                      it.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                      lastAdjust = "🤖 الروبوت نفذ صفقة شراء (BUY) عند $livePrice"
+                                      lastAdjustAt = now
+                                  }
+                              }
+                          }
+                          else -> {
+                              aiSignal = "⚖️ السعر ($livePrice) في منطقة توازن"
+                          }
+                      }
+                  }
+
+                  overlayView?.apply {
+                      bslPrice = activeBsl
+                      sslPrice = activeSsl
+                      currentPrice = livePrice ?: 0.0
+                      signalText = aiSignal
+                      showZones = prefs.drawLiquidity
+                      postInvalidate()
+                  }
 
                   val ver = mt5Version(this)
                   if (ver != null && prefs.approvedVersion.isEmpty()) prefs.approvedVersion = ver
@@ -419,14 +669,10 @@ jobs:
                   val fields = edits.map { it to fieldOf(it) }
                   val bal = numberAfterLabel(texts, balanceWords) ?: numberAfterLabel(descs, balanceWords)
                   val eq = numberAfterLabel(texts, equityWords) ?: numberAfterLabel(descs, equityWords)
-                  writeDiag(prefs, ver, now, fields, bal, eq, texts, descs)
+                  writeDiag(prefs, ver, now, fields, bal, eq, livePrice, activeBsl, activeSsl)
 
                   if (paused) {
-                      render(
-                          prefs,
-                          listOf("⏸ MT5 تحدّث ($ver) — الخدمة متوقفة", "افتح التطبيق واعتمد النسخة"),
-                          null, false
-                      )
+                      render(prefs, listOf("⏸ MT5 تحدّث ($ver) — اعتمد النسخة من التطبيق"), null, false)
                       return
                   }
 
@@ -465,7 +711,6 @@ jobs:
                   val warnings = mutableListOf<String>()
                   if (prefs.dailyEnabled && prefs.limitHit && prefs.dayKey == today) {
                       warnings += "🛑 بلغت حد الخسارة اليومي — التداول محظور!"
-                      // الحارس الآلي: إغلاق شاشة فتح الصفقة تلقائياً إذا حاول المتداول فتح صفقة جديدة
                       if (hasVolume && prefs.autoBlock && now - lastBlockAt > 1500) {
                           lastBlockAt = now
                           vibrate()
@@ -473,27 +718,37 @@ jobs:
                       }
                   }
 
-                  if (hasVolume && prefs.requireSl && slMissing) warnings += "⚠️ تنبيه: وقف الخسارة (SL) فارغ!"
-                  if (hasVolume && prefs.requireTp && tpMissing) warnings += "⚠️ تنبيه: جني الأرباح (TP) فارغ!"
+                  if (hasVolume && prefs.requireSl && slMissing) warnings += "⚠️ وقف الخسارة (SL) فارغ!"
+                  if (hasVolume && prefs.requireTp && tpMissing) warnings += "⚠️ جني الأرباح (TP) فارغ!"
                   render(prefs, warnings, pnlLine, hasVolume)
+              }
+
+              private fun extractChartPrice(texts: List<String>): Double? {
+                  for (t in texts) {
+                      val m = priceExtractRe.find(t)
+                      if (m != null) {
+                          val v = m.groupValues[1].toDoubleOrNull()
+                          if (v != null && v > 500.0) return v
+                      }
+                  }
+                  return null
               }
 
               private fun writeDiag(
                   prefs: Prefs, ver: String?, now: Long,
                   fields: List<Pair<AccessibilityNodeInfo, Field?>>,
-                  bal: Double?, eq: Double?, texts: List<String>, descs: List<String>
+                  bal: Double?, eq: Double?, livePrice: Double?, bsl: Double, ssl: Double
               ) {
                   if (now - lastDiagAt < 2000) return
                   lastDiagAt = now
                   val sb = StringBuilder()
                   sb.append("الوقت: ").append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())).append('\n')
                   sb.append("MT5: ").append(ver ?: "غير معروف").append('\n')
-                  sb.append("حقول الإدخال المرصودة: ").append(fields.size).append('\n')
-                  fields.forEachIndexed { i, (node, f) ->
-                      sb.append("  [").append(i).append("] نص='").append(node.text).append("' نوع=")
-                          .append(f?.name ?: "غير معروف")
-                          .append(" id=").append(node.viewIdResourceName ?: "-").append('\n')
-                  }
+                  sb.append("السعر المرصود: ").append(livePrice ?: "جاري البحث...").append('\n')
+                  sb.append("سيولة القمة (BSL): ").append(String.format(Locale.US, "%.2f", bsl)).append('\n')
+                  sb.append("سيولة القاع (SSL): ").append(String.format(Locale.US, "%.2f", ssl)).append('\n')
+                  sb.append("قرار الروبوت: ").append(aiSignal).append('\n')
+                  sb.append("حقول الإدخال: ").append(fields.size).append('\n')
                   sb.append("الرصيد: ").append(bal ?: "لم يُقرأ")
                       .append(" | الأسهم: ").append(eq ?: "لم تُقرأ").append('\n')
                   prefs.diag = sb.toString()
@@ -546,6 +801,8 @@ jobs:
               }
 
               private fun fieldOf(node: AccessibilityNodeInfo): Field? {
+                  val id = node.viewIdResourceName?.lowercase() ?: ""
+                  if (id.contains("volume")) return Field.VOLUME
                   labelOf(node)?.let { return it }
                   var p = node.parent
                   var depth = 0
@@ -606,40 +863,48 @@ jobs:
                   return c
               }
 
-              private fun collect(
+              private fun collectAll(
                   n: AccessibilityNodeInfo,
                   edits: MutableList<AccessibilityNodeInfo>,
                   texts: MutableList<String>,
-                  descs: MutableList<String>
+                  descs: MutableList<String>,
+                  onNode: (AccessibilityNodeInfo, String) -> Unit
               ) {
                   if (n.className == "android.widget.EditText") edits.add(n)
                   val t = n.text?.toString()
-                  if (!t.isNullOrBlank()) texts.add(t)
                   val d = n.contentDescription?.toString()
+                  if (!t.isNullOrBlank()) texts.add(t)
                   if (!d.isNullOrBlank()) descs.add(d)
+                  val combined = listOfNotNull(t, d).joinToString(" ")
+                  if (combined.isNotBlank()) onNode(n, combined)
                   for (i in 0 until n.childCount) {
                       val ch = n.getChild(i) ?: continue
-                      collect(ch, edits, texts, descs)
+                      collectAll(ch, edits, texts, descs, onNode)
                   }
               }
 
               private fun render(prefs: Prefs, warnings: List<String>, pnl: String?, volSeen: Boolean) {
-                  val tv = hud ?: return
+                  val tv = hudText ?: return
+                  val btn = botToggleBtn ?: return
+
+                  btn.text = if (prefs.botEnabled) "🤖 الروبوت: يعمل (ON) - اضغط للإيقاف" else "🤖 الروبوت: مراقب فقط (OFF) - اضغط للتشغيل"
+                  btn.setBackgroundColor(if (prefs.botEnabled) Color.parseColor("#FF1B5E20") else Color.parseColor("#FF37474F"))
+
                   val key = warnings.joinToString("|")
                   if (key.isNotEmpty() && key != lastWarnKey) vibrate()
                   lastWarnKey = key
                   if (warnings.isNotEmpty()) {
-                      tv.setBackgroundColor(Color.parseColor("#D9B71C1C"))
-                      tv.text = (warnings + listOfNotNull(pnl)).joinToString("\n")
+                      tv.setBackgroundColor(Color.parseColor("#E6B71C1C"))
+                      tv.text = (warnings + listOfNotNull(aiSignal, pnl)).joinToString("\n")
                       return
                   }
-                  tv.setBackgroundColor(Color.parseColor("#D90B3D2E"))
+                  tv.setBackgroundColor(Color.parseColor("#E60B3D2E"))
                   val adj = lastAdjust
-                  val seen = if (volSeen) " | ✓ اللوت مراقب" else ""
+                  val seen = if (volSeen) " | ✓ اللوت: ${prefs.maxLot}" else ""
                   val main = when {
-                      adj != null && System.currentTimeMillis() - lastAdjustAt < 5000 -> adj
-                      prefs.enabled -> "🛡️ الحماية فعالة (أقصى عقد: ${prefs.maxLot})$seen"
-                      else -> "🔓 قفل الحجم متوقف"
+                      adj != null && System.currentTimeMillis() - lastAdjustAt < 6000 -> adj
+                      prefs.enabled -> "🛡️ الحماية فعالة$seen\n$aiSignal"
+                      else -> "🔓 قفل الحجم متوقف\n$aiSignal"
                   }
                   tv.text = listOfNotNull(main, pnl).joinToString("\n")
               }
@@ -654,60 +919,113 @@ jobs:
                   }
               }
 
-              private fun showHud() {
+              private fun showOverlays() {
                   val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  val lp = WindowManager.LayoutParams(
+
+                  // 1. طبقة رسم خطوط ومناطق السيولة الشفافة فوق الشارت (لا تمنع اللمس)
+                  val overlayLp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  val ov = LiquidityOverlayView(this).apply { visibility = View.GONE }
+                  wm.addView(ov, overlayLp)
+                  overlayView = ov
+
+                  // 2. لوحة التحكم العائمة القابلة للسحب والتحريك بإصبعك
+                  val hudLp = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                       PixelFormat.TRANSLUCENT
                   ).apply {
-                      gravity = Gravity.TOP or Gravity.START
-                      x = 30
-                      y = 140
+                      gravity = Gravity.TOP or Gravity.LEFT
+                      x = 40
+                      y = 220
                   }
-                  hudParams = lp
+
+                  val container = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      visibility = View.GONE
+                  }
 
                   val tv = TextView(this).apply {
                       setTextColor(Color.parseColor("#FFD700"))
-                      setBackgroundColor(Color.parseColor("#D90B3D2E"))
+                      setBackgroundColor(Color.parseColor("#E60B3D2E"))
                       setPadding(28, 16, 28, 16)
-                      textSize = 12f
-                      visibility = View.GONE
+                      textSize = 11.5f
+                  }
 
-                      // ميزة سحب وتحريك الشاشة العائمة بالإصبع
-                      var initialX = 0
-                      var initialY = 0
-                      var touchX = 0f
-                      var touchY = 0f
-                      setOnTouchListener { _, event ->
-                          when (event.action) {
-                              MotionEvent.ACTION_DOWN -> {
-                                  initialX = lp.x
-                                  initialY = lp.y
-                                  touchX = event.rawX
-                                  touchY = event.rawY
-                                  true
-                              }
-                              MotionEvent.ACTION_MOVE -> {
-                                  lp.x = initialX + (event.rawX - touchX).toInt()
-                                  lp.y = initialY + (event.rawY - touchY).toInt()
-                                  wm.updateViewLayout(this, lp)
-                                  true
-                              }
-                              else -> false
+                  val btn = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.parseColor("#FF37474F"))
+                      setPadding(28, 12, 28, 12)
+                      textSize = 11f
+                  }
+
+                  // برمجة السحب السلس + الضغط على زر تشغيل/إيقاف الروبوت
+                  var initialX = 0
+                  var initialY = 0
+                  var touchX = 0f
+                  var touchY = 0f
+                  var moved = false
+
+                  val dragListener = View.OnTouchListener { view, event ->
+                      when (event.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              initialX = hudLp.x
+                              initialY = hudLp.y
+                              touchX = event.rawX
+                              touchY = event.rawY
+                              moved = false
+                              true
                           }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = (event.rawX - touchX).toInt()
+                              val dy = (event.rawY - touchY).toInt()
+                              if (abs(dx) > 10 || abs(dy) > 10) moved = true
+                              hudLp.x = initialX + dx
+                              hudLp.y = initialY + dy
+                              wm.updateViewLayout(container, hudLp)
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (!moved && view == btn) {
+                                  val p = Prefs(this@MT5AutoService)
+                                  p.botEnabled = !p.botEnabled
+                                  vibrate()
+                                  render(p, emptyList(), null, false)
+                              }
+                              true
+                          }
+                          else -> false
                       }
                   }
-                  wm.addView(tv, lp)
-                  hud = tv
+
+                  tv.setOnTouchListener(dragListener)
+                  btn.setOnTouchListener(dragListener)
+
+                  container.addView(tv)
+                  container.addView(btn)
+                  wm.addView(container, hudLp)
+
+                  hudContainer = container
+                  hudText = tv
+                  botToggleBtn = btn
                   render(Prefs(this), emptyList(), null, false)
               }
 
               override fun onDestroy() {
-                  hud?.let { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it) }
-                  hud = null
+                  val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  hudContainer?.let { wm.removeView(it) }
+                  overlayView?.let { wm.removeView(it) }
+                  hudContainer = null
+                  overlayView = null
                   super.onDestroy()
               }
 
