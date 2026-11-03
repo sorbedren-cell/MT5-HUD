@@ -64,6 +64,10 @@ jobs:
 
               <uses-permission android:name="android.permission.VIBRATE" />
 
+              <queries>
+                  <package android:name="net.metaquotes.metatrader5" />
+              </queries>
+
               <application
                   android:label="@string/app_name"
                   android:supportsRtl="true"
@@ -118,6 +122,18 @@ jobs:
               <string name="invalid">أدخل رقماً صحيحاً أكبر من صفر</string>
               <string name="require_sl">تنبيه عند غياب وقف الخسارة (SL)</string>
               <string name="require_tp">تنبيه عند غياب جني الأرباح (TP)</string>
+              <string name="enable_daily">تفعيل حد الخسارة اليومي</string>
+              <string name="daily_pct_label">حد الخسارة اليومي (% من الرصيد)</string>
+              <string name="reset_day">إعادة ضبط اليوم</string>
+              <string name="reset_done">تمت إعادة الضبط</string>
+              <string name="status_ok">✅ نسخة MT5 الحالية: %1$s (معتمدة)</string>
+              <string name="status_paused">⏸ تحدّث MT5 إلى %1$s (المعتمدة: %2$s). الخدمة متوقفة حتى تعتمد النسخة.</string>
+              <string name="status_unknown">نسخة MT5 غير معروفة (هل هو مثبّت؟)</string>
+              <string name="approve">اعتماد نسخة MT5 الحالية</string>
+              <string name="approved_done">تم اعتماد النسخة</string>
+              <string name="refresh_diag">تحديث التشخيص</string>
+              <string name="diag_title">تقرير التشخيص (انسخه وأرسله لي عند الحاجة)</string>
+              <string name="diag_empty">لا يوجد تقرير بعد. افتح MT5 ثم ارجع هنا.</string>
           </resources>
           EOF
           mkdir -p app/src/main/java/com/smart/mt5hud
@@ -144,6 +160,52 @@ jobs:
               var requireTp: Boolean
                   get() = sp.getBoolean("requireTp", false)
                   set(v) { sp.edit().putBoolean("requireTp", v).apply() }
+
+              var dailyEnabled: Boolean
+                  get() = sp.getBoolean("dailyEnabled", true)
+                  set(v) { sp.edit().putBoolean("dailyEnabled", v).apply() }
+
+              var dailyLimitPct: Double
+                  get() = sp.getString("dailyPct", "3.0")?.toDoubleOrNull() ?: 3.0
+                  set(v) { sp.edit().putString("dailyPct", v.toString()).apply() }
+
+              var dayKey: String
+                  get() = sp.getString("dayKey", "") ?: ""
+                  set(v) { sp.edit().putString("dayKey", v).apply() }
+
+              var dayBaseline: Double
+                  get() = sp.getString("dayBase", "0")?.toDoubleOrNull() ?: 0.0
+                  set(v) { sp.edit().putString("dayBase", v.toString()).apply() }
+
+              var limitHit: Boolean
+                  get() = sp.getBoolean("limitHit", false)
+                  set(v) { sp.edit().putBoolean("limitHit", v).apply() }
+
+              var approvedVersion: String
+                  get() = sp.getString("approvedVer", "") ?: ""
+                  set(v) { sp.edit().putString("approvedVer", v).apply() }
+
+              var diag: String
+                  get() = sp.getString("diag", "") ?: ""
+                  set(v) { sp.edit().putString("diag", v).apply() }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/smart/mt5hud
+          cat > app/src/main/java/com/smart/mt5hud/Mt5Info.kt <<'EOF'
+          package com.smart.mt5hud
+
+          import android.content.Context
+          import android.os.Build
+
+          const val MT5_PACKAGE = "net.metaquotes.metatrader5"
+
+          @Suppress("DEPRECATION")
+          fun mt5Version(ctx: Context): String? = try {
+              val pi = ctx.packageManager.getPackageInfo(MT5_PACKAGE, 0)
+              val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
+              "${pi.versionName}($code)"
+          } catch (e: Exception) {
+              null
           }
           EOF
           mkdir -p app/src/main/java/com/smart/mt5hud
@@ -158,10 +220,15 @@ jobs:
           import android.widget.*
 
           class MainActivity : Activity() {
+              private lateinit var prefs: Prefs
+              private lateinit var status: TextView
+              private lateinit var diagView: TextView
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val prefs = Prefs(this)
+                  prefs = Prefs(this)
                   val pad = (20 * resources.displayMetrics.density).toInt()
+                  val decimal = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
 
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
@@ -170,9 +237,10 @@ jobs:
                   val title = TextView(this).apply {
                       text = getString(R.string.app_name); textSize = 22f
                   }
+                  status = TextView(this)
                   val label = TextView(this).apply { text = getString(R.string.max_lot_label) }
                   val input = EditText(this).apply {
-                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      inputType = decimal
                       setText(prefs.maxLot.toString())
                   }
                   val toggle = Switch(this).apply {
@@ -184,27 +252,83 @@ jobs:
                   val tpSwitch = Switch(this).apply {
                       text = getString(R.string.require_tp); isChecked = prefs.requireTp
                   }
+                  val dailyLabel = TextView(this).apply { text = getString(R.string.daily_pct_label) }
+                  val dailyInput = EditText(this).apply {
+                      inputType = decimal
+                      setText(prefs.dailyLimitPct.toString())
+                  }
+                  val dailySwitch = Switch(this).apply {
+                      text = getString(R.string.enable_daily); isChecked = prefs.dailyEnabled
+                  }
                   val save = Button(this).apply {
                       text = getString(R.string.save)
                       setOnClickListener {
                           val v = input.text.toString().replace(',', '.').toDoubleOrNull()
-                          if (v == null || v <= 0.0) {
+                          val d = dailyInput.text.toString().replace(',', '.').toDoubleOrNull()
+                          if (v == null || v <= 0.0 || d == null || d <= 0.0 || d > 100.0) {
                               Toast.makeText(context, R.string.invalid, Toast.LENGTH_SHORT).show()
                           } else {
                               prefs.maxLot = v
                               prefs.enabled = toggle.isChecked
                               prefs.requireSl = slSwitch.isChecked
                               prefs.requireTp = tpSwitch.isChecked
+                              prefs.dailyLimitPct = d
+                              prefs.dailyEnabled = dailySwitch.isChecked
                               Toast.makeText(context, R.string.saved, Toast.LENGTH_SHORT).show()
                           }
                       }
+                  }
+                  val reset = Button(this).apply {
+                      text = getString(R.string.reset_day)
+                      setOnClickListener {
+                          prefs.limitHit = false
+                          prefs.dayKey = ""
+                          Toast.makeText(context, R.string.reset_done, Toast.LENGTH_SHORT).show()
+                      }
+                  }
+                  val approve = Button(this).apply {
+                      text = getString(R.string.approve)
+                      setOnClickListener {
+                          val ver = mt5Version(context)
+                          if (ver != null) {
+                              prefs.approvedVersion = ver
+                              Toast.makeText(context, R.string.approved_done, Toast.LENGTH_SHORT).show()
+                              refresh()
+                          }
+                      }
+                  }
+                  val diagTitle = TextView(this).apply { text = getString(R.string.diag_title) }
+                  diagView = TextView(this).apply { setTextIsSelectable(true) }
+                  val refreshBtn = Button(this).apply {
+                      text = getString(R.string.refresh_diag)
+                      setOnClickListener { refresh() }
                   }
                   val open = Button(this).apply {
                       text = getString(R.string.open_access)
                       setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                   }
-                  listOf(title, label, input, toggle, slSwitch, tpSwitch, save, open).forEach { root.addView(it) }
-                  setContentView(root)
+                  listOf(
+                      title, status, label, input, toggle, slSwitch, tpSwitch,
+                      dailyLabel, dailyInput, dailySwitch, save, reset, approve,
+                      diagTitle, diagView, refreshBtn, open
+                  ).forEach { root.addView(it) }
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh() {
+                  val ver = mt5Version(this)
+                  val approved = prefs.approvedVersion
+                  status.text = when {
+                      ver == null -> getString(R.string.status_unknown)
+                      approved.isEmpty() || approved == ver -> getString(R.string.status_ok, ver)
+                      else -> getString(R.string.status_paused, ver, approved)
+                  }
+                  diagView.text = prefs.diag.ifEmpty { getString(R.string.diag_empty) }
               }
           }
           EOF
@@ -224,24 +348,29 @@ jobs:
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
           import android.widget.TextView
+          import java.text.SimpleDateFormat
+          import java.util.Date
           import java.util.Locale
 
           class MT5AutoService : AccessibilityService() {
 
               private enum class Field { VOLUME, SL, TP }
 
-              private val mt5Package = "net.metaquotes.metatrader5"
               private val labels = mapOf(
                   Field.VOLUME to listOf("volume", "الحجم", "lots"),
                   Field.SL to listOf("stop loss", "stop-loss", "وقف الخسارة", "وقف خسارة"),
                   Field.TP to listOf("take profit", "take-profit", "جني الأرباح", "جني الربح", "هدف الربح")
               )
+              private val balanceWords = listOf("balance", "الرصيد")
+              private val equityWords = listOf("equity", "الأسهم", "حقوق الملكية")
+              private val numRe = Regex("^[-+]?[0-9][0-9 .,\u00A0\u202F]*\$")
 
               private var hud: TextView? = null
               private var lastRun = 0L
+              private var lastDiagAt = 0L
               private var lastAdjust: String? = null
               private var lastAdjustAt = 0L
-              private var warningShown = false
+              private var lastWarnKey = ""
 
               override fun onServiceConnected() {
                   super.onServiceConnected()
@@ -249,7 +378,7 @@ jobs:
               }
 
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-                  if (event?.packageName?.toString() != mt5Package) return
+                  if (event?.packageName?.toString() != MT5_PACKAGE) return
                   val now = System.currentTimeMillis()
                   if (now - lastRun < 300) return
                   lastRun = now
@@ -257,14 +386,33 @@ jobs:
                   val prefs = Prefs(this)
                   val root = rootInActiveWindow ?: return
                   val edits = mutableListOf<AccessibilityNodeInfo>()
-                  collectEdits(root, edits)
+                  val texts = mutableListOf<String>()
+                  collect(root, edits, texts)
+
+                  // أمان التحديث: عند تغيّر نسخة MT5 نوقف كل التدخلات حتى تعتمد النسخة الجديدة
+                  val ver = mt5Version(this)
+                  if (ver != null && prefs.approvedVersion.isEmpty()) prefs.approvedVersion = ver
+                  val paused = ver != null && ver != prefs.approvedVersion
+
+                  val fields = edits.map { it to fieldOf(it) }
+                  val bal = numberAfterLabel(texts, balanceWords)
+                  val eq = numberAfterLabel(texts, equityWords)
+                  writeDiag(prefs, ver, now, fields.map { it.second }, bal, eq, texts)
+
+                  if (paused) {
+                      render(
+                          prefs,
+                          listOf("⏸ MT5 تحدّث ($ver) — الخدمة متوقفة", "افتح MT5 Smart HUD ثم اعتمد النسخة"),
+                          null
+                      )
+                      return
+                  }
 
                   var hasVolume = false
                   var slMissing = false
                   var tpMissing = false
-
-                  for (node in edits) {
-                      when (fieldOf(node)) {
+                  for ((node, field) in fields) {
+                      when (field) {
                           Field.VOLUME -> {
                               hasVolume = true
                               if (prefs.enabled) capVolume(node, prefs.maxLot)
@@ -276,9 +424,76 @@ jobs:
                   }
 
                   val warnings = mutableListOf<String>()
+                  var pnlLine: String? = null
+
+                  // حد الخسارة اليومي: الأساس = أول رصيد يراه التطبيق في اليوم
+                  if (prefs.dailyEnabled) {
+                      val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                      if (bal != null && prefs.dayKey != today) {
+                          prefs.dayKey = today
+                          prefs.dayBaseline = bal
+                          prefs.limitHit = false
+                      }
+                      val base = prefs.dayBaseline
+                      if (bal != null && eq != null && prefs.dayKey == today && base > 0.0) {
+                          val pnl = eq - base
+                          val pct = pnl / base * 100.0
+                          pnlLine = String.format(Locale.US, "اليوم: %+.2f (%+.2f%%)", pnl, pct)
+                          if (-pct >= prefs.dailyLimitPct) prefs.limitHit = true
+                      }
+                      if (prefs.limitHit && prefs.dayKey == today) {
+                          warnings += "🛑 بلغت حد الخسارة اليومي — توقف اليوم"
+                      }
+                  }
+
                   if (hasVolume && prefs.requireSl && slMissing) warnings += "⚠️ لا يوجد وقف خسارة (SL)"
                   if (hasVolume && prefs.requireTp && tpMissing) warnings += "⚠️ لا يوجد جني أرباح (TP)"
-                  render(prefs, warnings)
+                  render(prefs, warnings, pnlLine)
+              }
+
+              // تقرير يكتبه التطبيق عما يراه على شاشة MT5 (للقراءة فقط)
+              private fun writeDiag(
+                  prefs: Prefs, ver: String?, now: Long, fields: List<Field?>,
+                  bal: Double?, eq: Double?, texts: List<String>
+              ) {
+                  if (now - lastDiagAt < 2000) return
+                  lastDiagAt = now
+                  val sb = StringBuilder()
+                  sb.append("الوقت: ").append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())).append('\n')
+                  sb.append("MT5: ").append(ver ?: "غير معروف").append('\n')
+                  sb.append("حقول الإدخال: ").append(fields.size)
+                      .append(" | حجم=").append(fields.count { it == Field.VOLUME })
+                      .append(" SL=").append(fields.count { it == Field.SL })
+                      .append(" TP=").append(fields.count { it == Field.TP }).append('\n')
+                  sb.append("الرصيد: ").append(bal ?: "لم يُقرأ")
+                      .append(" | الأسهم: ").append(eq ?: "لم تُقرأ").append('\n')
+                  sb.append("النصوص الظاهرة:\n")
+                  texts.take(50).forEach { sb.append("- ").append(it.take(40)).append('\n') }
+                  prefs.diag = sb.toString()
+              }
+
+              private fun parsePure(s: String): Double? {
+                  val t = s.trim().trim(':').trim()
+                  if (!numRe.matches(t)) return null
+                  val n = t.replace("\u00A0", "").replace("\u202F", "").replace(" ", "")
+                  val fixed = when {
+                      n.contains('.') -> n.replace(",", "")
+                      Regex("[-+]?\\d+,\\d{1,2}").matches(n) -> n.replace(',', '.')
+                      else -> n.replace(",", "")
+                  }
+                  return fixed.toDoubleOrNull()
+              }
+
+              private fun numberAfterLabel(texts: List<String>, words: List<String>): Double? {
+                  for (i in texts.indices) {
+                      val l = texts[i].lowercase()
+                      val w = words.firstOrNull { l.contains(it) } ?: continue
+                      parsePure(l.substringAfter(w))?.let { return it }
+                      for (j in i + 1..minOf(i + 2, texts.lastIndex)) {
+                          parsePure(texts[j])?.let { return it }
+                      }
+                  }
+                  return null
               }
 
               private fun capVolume(node: AccessibilityNodeInfo, maxLot: Double) {
@@ -349,30 +564,38 @@ jobs:
                   return c
               }
 
-              private fun collectEdits(n: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
-                  if (n.className == "android.widget.EditText") out.add(n)
+              private fun collect(
+                  n: AccessibilityNodeInfo,
+                  edits: MutableList<AccessibilityNodeInfo>,
+                  texts: MutableList<String>
+              ) {
+                  if (n.className == "android.widget.EditText") edits.add(n)
+                  val t = n.text?.toString()
+                  if (!t.isNullOrBlank()) texts.add(t)
                   for (i in 0 until n.childCount) {
                       val ch = n.getChild(i) ?: continue
-                      collectEdits(ch, out)
+                      collect(ch, edits, texts)
                   }
               }
 
-              private fun render(prefs: Prefs, warnings: List<String>) {
+              private fun render(prefs: Prefs, warnings: List<String>, pnl: String?) {
                   val tv = hud ?: return
+                  val key = warnings.joinToString("|")
+                  if (key.isNotEmpty() && key != lastWarnKey) vibrate()
+                  lastWarnKey = key
                   if (warnings.isNotEmpty()) {
                       tv.setBackgroundColor(Color.parseColor("#CCB71C1C"))
-                      tv.text = warnings.joinToString("\n")
-                      if (!warningShown) { vibrate(); warningShown = true }
+                      tv.text = (warnings + listOfNotNull(pnl)).joinToString("\n")
                       return
                   }
-                  warningShown = false
                   tv.setBackgroundColor(Color.parseColor("#CC0B3D2E"))
                   val adj = lastAdjust
-                  tv.text = when {
+                  val main = when {
                       adj != null && System.currentTimeMillis() - lastAdjustAt < 5000 -> adj
                       prefs.enabled -> "🔒 الحد الأقصى ${prefs.maxLot}"
                       else -> "🔓 القفل متوقف"
                   }
+                  tv.text = listOfNotNull(main, pnl).joinToString("\n")
               }
 
               @Suppress("DEPRECATION")
@@ -403,7 +626,7 @@ jobs:
                   ).apply { gravity = Gravity.TOP or Gravity.END; y = 120 }
                   wm.addView(tv, lp)
                   hud = tv
-                  render(Prefs(this), emptyList())
+                  render(Prefs(this), emptyList(), null)
               }
 
               override fun onDestroy() {
